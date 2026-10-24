@@ -1,0 +1,22 @@
+[project]
+name = "aws-deploy-pipeline-demo"
+version = "0.1.0"
+description = "Minimal demo app used as the deployment target for this repo's infrastructure."
+# Exact interpreter version is pinned in .python-version.
+requires-python = ">=3.12.14,<3.13"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest tests work; tests use dummy secret values.
+"tests/**" = ["S101", "S105"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
