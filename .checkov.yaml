@@ -1,0 +1,11 @@
+# Read automatically when checkov runs from the repo root: `checkov`.
+# Never add skip-check here to make CI pass (CLAUDE.md rule 6). Suppress a single
+# finding inline on the resource with `#checkov:skip=<ID>: <reason>, <date>`.
+directory:
+  - infra/terraform
+framework:
+  - terraform
+external-checks-dir:
+  - infra/terraform/checkov
+compact: true
+quiet: true
