@@ -1,0 +1,50 @@
+%% Target architecture (design only, 2026-10-24). See ../architecture.md.
+flowchart LR
+    user([User browser])
+    operator([Operator])
+    dns[(DNS A record<br/>human-managed)]
+
+    subgraph gh[GitHub]
+        repo[Repo main branch<br/>protected]
+        actions[Actions<br/>lint, test, build, Trivy]
+    end
+
+    subgraph aws[AWS account / region TBD]
+        sts[STS + OIDC provider]
+        deployrole[Deploy role<br/>ECR push: 1 repo<br/>SendCommand: 1 doc, 1 instance]
+        ecr[(ECR<br/>immutable tags = git SHA)]
+        ssm[SSM<br/>Run Command, Session Manager,<br/>Parameter Store SecureString]
+        cw[CloudWatch<br/>metrics, logs, alarms]
+        sns[SNS email]
+        s3state[(S3 Terraform state<br/>versioned, use_lockfile)]
+
+        subgraph vpc[VPC]
+            igw[Internet gateway]
+            subgraph pub[Public subnet]
+                sg{{SG: 80/443 in<br/>22 closed}}
+                subgraph ec2[EC2 Ubuntu LTS, IMDSv2 hop limit 1, Elastic IP]
+                    nginx[Nginx :443<br/>Let's Encrypt]
+                    slotA[app slot A<br/>127.0.0.1:8001]
+                    slotB[app slot B<br/>127.0.0.1:8002]
+                    agents[SSM agent<br/>CloudWatch agent<br/>deploy script]
+                end
+            end
+        end
+    end
+
+    user -->|HTTPS| dns
+    dns --> igw --> sg --> nginx
+    nginx -->|active slot| slotA
+    nginx -.->|standby| slotB
+
+    repo --> actions
+    actions -->|OIDC token| sts --> deployrole
+    deployrole -->|push SHA tag| ecr
+    deployrole -->|send-command sha| ssm
+    ssm -->|outbound session| agents
+    agents -->|pull via instance role| ecr
+    agents -->|get DEMO_SECRET| ssm
+    agents -->|metrics + logs| cw --> sns --> operator
+
+    operator -->|terraform plan/apply| s3state
+    operator -->|Session Manager| ssm
