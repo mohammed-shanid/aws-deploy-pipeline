@@ -8,7 +8,9 @@
 - Do not start a phase until the previous phase's **Gate** has passed. You check the gate yourself, not Claude.
 - Anything that creates, changes or deletes AWS resources is run **by you** in your terminal, after reading the plan.
 
-Order: 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10. Phases 4–9 each produce something real you can show.
+Order: 0 → 1 → 2 → 3b → 4 → 5 → 6 → 7 → 8 → 9 → 10. Phase 3 (skills) is Later. Phases 4–9 each produce something real you can show.
+
+From Phase 5 on, each phase must pass its **local** harness check (Phase 3b, `docs/architecture/deployment.md` §6) before anything is run against AWS.
 
 ---
 
@@ -77,7 +79,9 @@ Explain why private subnets exist in this design when nothing runs in them, or r
 
 ---
 
-## Phase 3 — Skills
+## Phase 3 — Skills (Later)
+
+Deferred on 2026-10-28; run it after Phase 10. Until then, a prompt below that says "Use the <name> skill" means: follow that procedure as listed in CLAUDE.md, § Skills (Later).
 
 ```
 Check the installed Claude Code version and the current skills documentation. Then create three project skills under .claude/skills/<name>/SKILL.md, using the correct frontmatter (name, description):
@@ -90,6 +94,25 @@ Each skill needs: when to use it, prerequisites, steps, verification, failure ha
 ```
 
 **Gate:** in a fresh session, ask "what skills do you have?" and confirm all three are listed.
+
+---
+
+## Phase 3b — Local test harness (no AWS)
+
+```
+Add a local test harness before any AWS work, and update PROMPTS.md so Phases 5–8 use it:
+1. Terraform: add `terraform test` files using mock_provider for the dev env, asserting: required tags on all resources, no ingress on 22, IMDSv2 required, EBS encrypted, OIDC trust subject matches the repo. Add checkov (or trivy config) as a CI step. Verify the mock_provider syntax against current Terraform docs.
+2. Ansible: a local Ubuntu 24.04 target using OrbStack (check `orb` is installed), with an inventory file for it. Each role must pass two runs with changed=0 on the second. Use a self-signed cert locally; keep Let's Encrypt for the AWS environment only.
+3. Deploy/rollback: a local test that deploys a good image SHA, then a deliberately broken one, and asserts the previous container is still serving /version.
+Document in docs/architecture/deployment.md which checks run locally and which only run on AWS, and why.
+Don't touch any AWS account.
+```
+
+Result (2026-10-24): the tests were written before the code they test, so they are the spec for Phases 5–8. Layout: `infra/terraform/envs/dev/tests/`, `infra/terraform/checkov/`, `.checkov.yaml`, `infra/ansible/inventories/local/`, `infra/ansible/tests/`, `.github/workflows/ci.yml` (`iac` job), `requirements-infra.txt`.
+
+**You do:** install OrbStack and open it once. Then run `python3.12 -m venv .venv-infra && .venv-infra/bin/pip install -r requirements-infra.txt`.
+
+**Gate:** `infra/ansible/tests/orb_machine.sh` creates the machine, reports `ubuntu 24.04`, and the Ansible ping succeeds. deployment.md §6.4 records how the harness itself was verified.
 
 ---
 
@@ -125,12 +148,18 @@ Create infra/terraform/envs/dev/ using the S3 backend from Phase 4, with small m
 - ECR repo: immutable tags, scan on push, lifecycle policy keeping the last N images
 - GitHub OIDC provider and a deploy role whose trust policy is restricted to repo:<owner>/<repo>:ref:refs/heads/main, with permissions only for ECR push to this repo and ssm:SendCommand to this instance
 
+The local harness is the spec. Read infra/terraform/envs/dev/tests/guardrails.tftest.hcl first and use the resource addresses in its header (tags via local.common_tags → provider default_tags; IAM JSON via jsonencode()). Do not edit the tests to get to green.
+Before any plan with credentials, these must pass and their output must be shown:
+- terraform -chdir=infra/terraform/envs/dev init -backend=false && terraform -chdir=infra/terraform/envs/dev test
+- .venv-infra/bin/checkov from the repo root. For each finding, fix it or add an inline `#checkov:skip=<ID>: <reason>, <date>` with the reason (e.g. CKV_AWS_260, port 80 open by design). Never add a skip in .checkov.yaml.
+Then run plan, and run the tags_all check on the saved plan (deployment.md §6.2).
+
 For every IAM policy, explain each action and why it's needed. Run plan and stop.
 ```
 
 **You run:** apply. Then `aws ssm describe-instance-information` and confirm the instance shows as Online.
 
-**Gate:** you can open an SSM session to the instance, and port 22 is closed or limited to your IP.
+**Gate:** `terraform test` and checkov pass locally and in the `ci` workflow on the PR. The `tags_all` plan check prints nothing. You can open an SSM session to the instance, and port 22 is closed or limited to your IP.
 
 ---
 
@@ -148,11 +177,17 @@ Create infra/ansible/. Use SSM as the connection method if practical (check the 
 
 Domain and email are variables. Run ansible-lint and --check --diff. Show me the commands to run for real, then stop.
 Note: Let's Encrypt no longer sends expiry warning emails (verify this). Phase 9 needs its own certificate-expiry check.
+
+Develop against the local OrbStack target first (infra/ansible/inventories/local). Every variable in its group_vars must also be defined for AWS.
+- TLS: `tls_mode: selfsigned` locally (key and cert at tls_key_path/tls_cert_path, app_domain as a SAN, generated idempotently), `letsencrypt` on AWS only. The nginx role must fail if tls_mode is letsencrypt while env_name is local.
+- Write /etc/app/deploy.env from the deploy.env variables (deployment.md §2), even though the deploy script itself comes in Phase 8.
+- Run `infra/ansible/tests/idempotence.sh --fresh`, then `--role <name>` for each role, and show the output. The second run of each must report changed=0. Do not hide changes with `changed_when: false` on tasks that really change state.
+Only after that, run --check --diff against AWS.
 ```
 
-**You run:** the playbook twice.
+**You run:** `infra/ansible/tests/idempotence.sh --fresh` (local), then the AWS playbook twice.
 
-**Gate:** the second run reports `changed=0`, and `curl -I https://<domain>` returns the Nginx response with a valid cert.
+**Gate:** the local harness passes for site.yml and for each role on its own. On AWS, the second run reports `changed=0`, and `curl -I https://<domain>` returns the Nginx response with a valid cert.
 
 ---
 
@@ -167,9 +202,10 @@ Containerise the application without changing its behaviour.
 - config from env vars; secrets never baked into the image or build args
 
 Build locally, run it, hit the health endpoint, run the existing tests, run `trivy image` and report HIGH/CRITICAL findings with a fix or a justified exception for each. Report the final image size.
+The Dockerfile lives at the repo root. The local rollback test builds infra/ansible/tests/fixtures/broken on top of this image, so `python` must be on PATH and the app must honour HOST/PORT. Check that the fixture image builds.
 ```
 
-**Gate:** the container starts, it is healthy, it runs as non-root (`docker exec <c> id`), and the Trivy results are documented.
+**Gate:** the container starts, it is healthy, it runs as non-root (`docker exec <c> id`), and the Trivy results are documented. The image also builds inside the OrbStack machine (`orb -m adp-noble docker build <repo path>`), since the Phase 8 rollback test builds it there.
 
 ---
 
@@ -178,17 +214,20 @@ Build locally, run it, hit the health endpoint, run the existing tests, run `tri
 ```
 Use the deploy-and-rollback skill.
 
-Create GitHub Actions workflows (extend existing ones from the audit rather than duplicating them):
+Create GitHub Actions workflows. Extend existing ones rather than duplicating them: ci.yml already has the `iac` job from Phase 3b; add jobs to it.
 - ci.yml on PRs: lint, test, docker build, Trivy (fail on CRITICAL), terraform fmt/validate
 - deploy.yml on main: same checks → build → push to ECR tagged with the full git SHA → deploy via aws ssm send-command
 - pin every third-party action to a commit SHA; least-privilege `permissions:` block per job; id-token: write only on the job that assumes the AWS role
 
 On-instance deploy script (installed by Ansible): pull the image by SHA; fetch secrets from Parameter Store into the container env without writing them to disk or logs; start the new container; poll its health for N seconds; on success, switch Nginx/upstream and record current/previous tags; on failure, keep or restore the previous container and exit non-zero so the workflow fails.
 
+The deploy script must meet the contract in docs/architecture/deployment.md §2 and the header of infra/ansible/tests/deploy_rollback_inner.sh: inputs from /etc/app/deploy.env (REGISTRY_AUTH ecr|none, SECRETS_SOURCE ssm|none), state in /opt/app/state/{current,previous}, label adp.app=aws-deploy-pipeline, HEALTH_TIMEOUT_SECONDS override. The local/AWS difference must be limited to those config switches, not separate code paths for the gate and switch logic.
+Before any AWS deploy: re-run infra/ansible/tests/idempotence.sh (the script is installed by Ansible), then infra/ansible/tests/deploy_rollback.sh, and show both outputs. Do not edit the test to get to green.
+
 Before I merge, show the exact trust policy the workflow will assume. Explain how to test the rollback deliberately.
 ```
 
-**Gate:** one green deploy, then a deliberately broken commit (a health endpoint returning 500) that the pipeline **rolls back automatically** while the site stays up. Save the run links.
+**Gate:** `deploy_rollback.sh` passes locally (both broken releases rejected, zero failed requests). Then one green deploy on AWS, then a deliberately broken commit (a health endpoint returning 500) that the pipeline **rolls back automatically** while the site stays up. Save the run links.
 
 ---
 
@@ -212,19 +251,21 @@ Show the plan and stop. After I apply, give me commands to trigger each alarm sa
 
 ## Phase 10 — Break it on purpose, then finish the README
 
-Run one session per incident, using the incident-drill skill:
+Two drills, one session each, using the incident-drill skill:
 
 ```
-Use the incident-drill skill for: <disk full | app container stopped | 443 blocked in the security group | expired certificate>.
+Use the incident-drill skill for: <hung app | 443 blocked in the security group>.
 Tell me exactly what you'll do to cause the failure and how to undo it before doing anything. Wait for my OK.
+For the hung app, the process must stay up with its port open but stop answering, so it's not the same as a crash. Show what detects it (Docker health status, the watchdog, the uptime alarm) and how long each takes.
 For the security-group change, give me the command to run myself.
-For the expired cert, don't try to make a real Let's Encrypt cert expire. Propose a safe simulation (e.g. a short-lived self-signed cert on a test subdomain) and say what it does and doesn't prove.
 ```
+
+Later: disk full and expired certificate. For the expired cert, don't try to make a real Let's Encrypt cert expire. Propose a safe simulation (e.g. a short-lived self-signed cert on a test subdomain) and say what it does and doesn't prove.
 
 Then:
 
 ```
-Write the README: what it is, the architecture diagram (from the .mmd), prerequisites, make up / make destroy (create the Makefile wrapping the existing commands; destroy must print the plan and require typed confirmation), cost note linking cost-estimate.md, and links to every docs/incidents/ write-up.
+Update README.md (it already exists; keep its sections): add make up / make destroy (create the Makefile wrapping the existing commands; destroy must print the plan and require typed confirmation), link every docs/incidents/ write-up, and update the "What's proven so far" and Roadmap tables with evidence links.
 Finally, review the full diff since main for secrets, wildcard IAM, open ports and unpinned versions. List anything still unverified.
 ```
 
