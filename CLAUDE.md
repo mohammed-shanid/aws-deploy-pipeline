@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Instructions for Claude Code sessions in this repository. Keep this file short: detailed procedures live in `.claude/skills/` and `docs/architecture/`.
+Instructions for Claude Code sessions in this repository. Keep this file short: detailed procedures live in `docs/architecture/` (and later in `.claude/skills/`).
 
 > Sections marked `FILL` are completed by the Phase 1 audit (see PROMPTS.md) from the real repository. Until then, treat them as unknown. Do not guess them.
 
@@ -10,6 +10,8 @@ This repository contains an application and the infrastructure that runs it on A
 Terraform (network, compute, IAM, state), Ansible (host configuration), Docker (runtime), GitHub Actions (CI/CD), CloudWatch (monitoring).
 
 The goal is a small system that one engineer can build, deploy, break, diagnose and recover — not maximum scale.
+
+Repository: `mohammed-shanid/aws-deploy-pipeline` on GitHub. Deploys come only from `main`.
 
 ## Application (FILL)
 
@@ -23,14 +25,23 @@ The goal is a small system that one engineer can build, deploy, break, diagnose 
 
 ## Architecture (summary)
 
+Target design, not deployed yet. Must match the ADRs; change both together.
+
 ```
-GitHub Actions ──OIDC──> AWS IAM role (scoped to this repo + main branch)
-      │ build → test → Trivy scan → push to ECR (tag = git SHA)
-      │ deploy via SSM Run Command (no inbound SSH from CI)
+GitHub Actions ──OIDC──> deploy role (StringEquals sub = repo:mohammed-shanid/aws-deploy-pipeline:ref:refs/heads/main)
+      │ lint → test → build → Trivy → push to ECR (immutable tag = full git SHA)            ADR 0003
+      │ ssm:SendCommand on one custom deploy document (only param: 40-hex sha) and          ADR 0002
+      │ one instance. Not AWS-RunShellScript, no SSH from CI
       ▼
-EC2 (public subnet, Ubuntu LTS, instance role, IMDSv2 only)
-  Nginx :443 (Let's Encrypt) → app container on 127.0.0.1
+EC2 t3.small in one public subnet, Elastic IP. No ALB, no NAT, no private subnets           ADR 0001
+  Ubuntu LTS, IMDSv2 required with hop limit 1, encrypted gp3 root, least-privilege instance role
+  SG + ufw: 80/443 in, 22 closed (shell via SSM Session Manager)
+  Nginx :443 (Let's Encrypt) → active slot 127.0.0.1:8001 or :8002 → app container :8000
+  Deploy script: start inactive slot → health gate → switch Nginx; on failure the old slot keeps serving.
+    State in /opt/app/state/{current,previous}
+  DEMO_SECRET: SSM Parameter Store SecureString, created by the human, read at container start  ADR 0005
   CloudWatch agent → metrics + logs → alarms → SNS email
+Terraform state: S3 backend with use_lockfile (no DynamoDB); bootstrap/ uses local state     ADR 0004
 ```
 
 Full detail: `docs/architecture/architecture.md`. Decisions: `docs/architecture/adr/`.
@@ -41,10 +52,11 @@ Full detail: `docs/architecture/architecture.md`. Decisions: `docs/architecture/
 app source           FILL (existing layout, do not restructure)
 infra/terraform/     bootstrap/ (state bucket, budget) and envs/<env>/ + modules/
 infra/ansible/       inventory, playbooks, roles
+infra/tests/         tests of the tests (Terraform mutation check); outside infra/terraform so checkov skips its fixture
 .github/workflows/   CI and deploy pipelines
 docs/architecture/   architecture, security, deployment, cost, ADRs, diagrams (Mermaid)
 docs/incidents/      incident write-ups (symptom, commands, root cause, fix)
-.claude/skills/      Claude Code skills for repeatable workflows
+.claude/skills/      Claude Code skills for repeatable workflows (Later)
 ```
 
 Only create directories when the phase that needs them starts.
@@ -59,6 +71,7 @@ Only list commands here after they have been run successfully in this repo.
 | App lint | FILL |
 | Terraform format / validate | `terraform fmt -check -recursive infra/terraform` · `terraform -chdir=infra/terraform/envs/<env> validate` |
 | Terraform plan | `terraform -chdir=infra/terraform/envs/<env> plan -out=tfplan` |
+| Terraform guardrail mutation check | `.venv/bin/python infra/tests/terraform_mutation/mutate.py` (~3 min) |
 | Ansible lint / dry run | `ansible-lint infra/ansible` · `ansible-playbook ... --check --diff` |
 | Image build / scan | FILL after Dockerfile exists |
 | Bring up / tear down | `make up` / `make destroy` (once Makefile exists) |
@@ -79,7 +92,7 @@ These are not negotiable. If a task seems to require breaking one, stop and ask.
 
 ## Infrastructure-as-code standards
 
-- Terraform ≥ 1.10 with S3 remote state, native S3 locking (`use_lockfile = true`), versioning and encryption on the state bucket. Verify against current Terraform docs before writing the backend block.
+- Terraform ≥ 1.11 (`use_lockfile` was experimental in 1.10, ADR 0004) with S3 remote state, native S3 locking (`use_lockfile = true`), versioning and encryption on the state bucket. Verify against current Terraform docs before writing the backend block.
 - Pin provider versions; commit `.terraform.lock.hcl`.
 - `bootstrap/` (state bucket, budget alert) uses local state and is applied once, before anything else.
 - Tag every resource: `Project`, `Environment`, `Owner`, `ManagedBy=terraform`.
@@ -117,13 +130,14 @@ These are not negotiable. If a task seems to require breaking one, stop and ask.
 1. Changes implemented on the phase branch.
 2. Verification commands run; output shown.
 3. Docs updated to match what exists.
-4. Diff reviewed for secrets and unrelated edits.
-5. Summary: what changed, what was verified, what is blocked, and the human actions still required.
+4. README status updated: the "What's proven so far" table and the Roadmap status column, with evidence links only for what was actually run.
+5. Diff reviewed for secrets and unrelated edits.
+6. Summary: what changed, what was verified, what is blocked, and the human actions still required.
 
-## Skills
+## Skills (Later)
 
-See `.claude/skills/`. Use them when their description matches the task:
-- `infra-change` — any Terraform or Ansible change (plan-only workflow)
-- `deploy-and-rollback` — release, verify, roll back
-- `incident-drill` — break-and-fix exercises and write-ups
+Not created yet; deferred (PROMPTS.md Phase 3). Until they exist, follow the matching procedure directly:
+- `infra-change`: fmt → validate → checkov → `plan -out` → summarise → hand the apply to the human
+- `deploy-and-rollback`: `docs/architecture/deployment.md`
+- `incident-drill`: write-ups in `docs/incidents/` (symptom, commands with real output, root cause, fix, prevention)
 
