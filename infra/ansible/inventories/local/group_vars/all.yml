@@ -1,0 +1,24 @@
+# Local (OrbStack) values. The AWS inventory (Phase 6) sets its own.
+# Contract for the roles: every variable here must also be defined for AWS.
+
+env_name: local
+
+# TLS: a self-signed certificate, generated on the host. Let's Encrypt is AWS-only:
+# a .test name cannot pass an ACME challenge, and test runs must not spend
+# Let's Encrypt rate limits. The nginx role must fail if tls_mode is letsencrypt
+# while env_name is local.
+tls_mode: selfsigned # selfsigned | letsencrypt
+app_domain: app.adp.test
+letsencrypt_email: "" # unused when tls_mode is selfsigned
+# The certificate must carry app_domain as a subjectAltName (curl checks SANs).
+# The rollback test trusts exactly this file instead of disabling TLS verification.
+tls_cert_path: /etc/ssl/adp/app.crt
+tls_key_path: /etc/ssl/adp/app.key
+
+# Deploy script (Phase 8) inputs. Locally images come from a registry on the
+# machine's loopback and there is no Parameter Store, so the app runs with
+# APP_ENV=dev, where DEMO_SECRET is optional.
+app_env: dev
+image_repo: 127.0.0.1:5000/aws-deploy-pipeline
+registry_auth: none # ecr | none
+secrets_source: none # ssm | none
