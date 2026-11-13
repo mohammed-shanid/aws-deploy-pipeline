@@ -1,11 +1,12 @@
-# Layout and inputs for the on-host deploy script (deployment.md §2). The script
-# itself (/opt/app/bin/deploy) is added on roadmap Day 3. It runs as root, so
-# these are root-owned and the deploy user cannot change what a deploy does.
+# The on-host deploy script, its inputs and the watchdog (deployment.md §2).
+# Deploys run as root, so everything here is root-owned and the deploy user
+# cannot change what a deploy does.
 - name: Check the deploy settings
   ansible.builtin.assert:
     that:
       - registry_auth in ['ecr', 'none']
       - secrets_source in ['ssm', 'none']
+      - secrets_source == 'none' or secret_parameter is ansible.builtin.match('^/')
     quiet: true
 
 - name: Create the deploy directories
@@ -38,3 +39,35 @@
     owner: root
     group: root
     mode: "0644"
+
+- name: Install the deploy script and the watchdog
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ app_deploy_root }}/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - deploy
+    - watchdog
+
+- name: Install the watchdog units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - adp-watchdog.service
+    - adp-watchdog.timer
+  notify: Reload systemd
+
+- name: Load the watchdog units now if they changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the watchdog timer
+  ansible.builtin.systemd_service:
+    name: adp-watchdog.timer
+    enabled: true
+    state: started

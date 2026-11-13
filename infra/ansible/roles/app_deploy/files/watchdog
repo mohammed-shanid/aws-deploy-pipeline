@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# /opt/app/bin/watchdog   (run every 30 s by adp-watchdog.timer, as root)
+#
+# Restarts an app container that Docker reports as "unhealthy": the process is
+# up and its port is open, but /health stopped answering (a hang, not a crash;
+# a crash is already handled by --restart unless-stopped). Docker marks a
+# container unhealthy but never restarts it on its own.
+set -euo pipefail
+
+APP_LABEL=adp.app=aws-deploy-pipeline
+LOCK_FILE=/opt/app/deploy.lock
+
+log() { printf '%s watchdog: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+# During a deploy the new slot may be unhealthy on purpose (still starting, or
+# a broken release the deploy is about to remove). Leave it to the deploy.
+exec 9> "$LOCK_FILE"
+flock -n 9 || exit 0
+
+while read -r id name; do
+  [[ -n $id ]] || continue
+  log "restarting unhealthy container $name ($id)"
+  docker restart "$id" > /dev/null
+done < <(docker ps --filter "label=$APP_LABEL" --filter health=unhealthy --format '{{.ID}} {{.Names}}')
