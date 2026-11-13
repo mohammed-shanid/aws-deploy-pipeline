@@ -1,0 +1,40 @@
+# Layout and inputs for the on-host deploy script (deployment.md §2). The script
+# itself (/opt/app/bin/deploy) is added on roadmap Day 3. It runs as root, so
+# these are root-owned and the deploy user cannot change what a deploy does.
+- name: Check the deploy settings
+  ansible.builtin.assert:
+    that:
+      - registry_auth in ['ecr', 'none']
+      - secrets_source in ['ssm', 'none']
+    quiet: true
+
+- name: Create the deploy directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ app_deploy_root }}"
+    - "{{ app_deploy_root }}/bin"
+    - "{{ app_deploy_root }}/state"
+    - "{{ app_deploy_env_file | dirname }}"
+    - "{{ app_deploy_log_dir }}"
+
+# No secrets in this file: DEMO_SECRET is read from Parameter Store at deploy time.
+- name: Write the deploy script's inputs
+  ansible.builtin.template:
+    src: deploy.env.j2
+    dest: "{{ app_deploy_env_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Rotate the deploy logs
+  ansible.builtin.template:
+    src: logrotate-app.j2
+    dest: /etc/logrotate.d/adp-app
+    owner: root
+    group: root
+    mode: "0644"

@@ -72,7 +72,10 @@ Only list commands here after they have been run successfully in this repo.
 | Terraform format / validate | `terraform fmt -check -recursive infra/terraform` · `terraform -chdir=infra/terraform/envs/<env> validate` |
 | Terraform plan | `terraform -chdir=infra/terraform/envs/<env> plan -out=tfplan` |
 | Terraform guardrail mutation check | `.venv/bin/python infra/tests/terraform_mutation/mutate.py` (~3 min) |
-| Ansible lint / dry run | `ansible-lint infra/ansible` · `ansible-playbook ... --check --diff` |
+| Ansible collections (once) | `.venv-infra/bin/ansible-galaxy collection install -r infra/ansible/collections/requirements.yml -p .ansible/collections` |
+| Ansible lint | `.venv-infra/bin/ansible-lint` (repo root; config in `.ansible-lint`) |
+| Ansible idempotence, local OrbStack | `infra/ansible/tests/idempotence.sh --fresh` · `... --role <name>` (`--fresh` deletes and recreates the `adp-noble` machine) |
+| Ansible dry run, local | from `infra/ansible`: `ansible-playbook -i inventories/local/hosts.yml site.yml --check --diff` (only meaningful on an already-configured host) |
 | Image build / scan | FILL after Dockerfile exists |
 | Bring up / tear down | `make up` / `make destroy` (once Makefile exists) |
 

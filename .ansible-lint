@@ -1,0 +1,9 @@
+# Run from the repo root: .venv-infra/bin/ansible-lint
+profile: production
+exclude_paths:
+  - .harness/
+  - .venv/
+  - .venv-infra/
+  - .github/
+  - infra/tests/
+  - infra/terraform/

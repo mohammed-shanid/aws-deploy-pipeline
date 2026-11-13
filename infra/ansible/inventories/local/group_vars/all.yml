@@ -22,3 +22,6 @@ app_env: dev
 image_repo: 127.0.0.1:5000/aws-deploy-pipeline
 registry_auth: none # ecr | none
 secrets_source: none # ssm | none
+
+# Local harness: user for the deploy tooling (also defined for AWS).
+deploy_user: deploy

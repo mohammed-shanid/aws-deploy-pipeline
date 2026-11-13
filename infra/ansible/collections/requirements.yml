@@ -1,0 +1,8 @@
+# Pinned collections (ansible-core ships only ansible.builtin).
+# Install: .venv-infra/bin/ansible-galaxy collection install \
+#   -r infra/ansible/collections/requirements.yml -p .ansible/collections
+collections:
+  - name: community.general # ufw, timezone
+    version: 14.0.1
+  - name: community.crypto # self-signed certificate for the local harness
+    version: 3.5.1

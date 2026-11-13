@@ -24,8 +24,9 @@ if ! command -v ansible > /dev/null 2>&1; then
   exit 127
 fi
 
+# `orb list` prints no header row when piped, so every line is a machine.
 machine_exists() {
-  orb list | awk 'NR > 1 { print $1 }' | grep -qx "$MACHINE"
+  orb list | awk '{ print $1 }' | grep -qx "$MACHINE"
 }
 
 mkdir -p "$ROOT/.harness"

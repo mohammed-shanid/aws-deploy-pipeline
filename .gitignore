@@ -21,3 +21,6 @@ __pycache__/
 
 # Local test harness
 .harness/
+
+# Ansible collections and ansible-lint cache
+.ansible/
