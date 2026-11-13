@@ -3,3 +3,4 @@ app_deploy_env_file: /etc/app/deploy.env
 app_deploy_log_dir: /var/log/app
 app_deploy_health_timeout_seconds: 60
 app_deploy_log_rotate_weeks: 8
+app_deploy_watchdog_interval_seconds: 30

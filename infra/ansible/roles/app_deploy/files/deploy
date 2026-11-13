@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# /opt/app/bin/deploy <40-hex git sha>      (installed by Ansible, runs as root)
+#
+# Starts the release in the inactive slot, waits for /health, then switches
+# Nginx. Exit 0 = released. Non-zero = the previous release is still serving,
+# untouched. Contract: docs/architecture/deployment.md §2.
+#
+# This script handles a secret (DEMO_SECRET). Never add `set -x`, and never
+# echo that variable.
+set -euo pipefail
+
+ENV_FILE=${DEPLOY_ENV_FILE:-/etc/app/deploy.env}
+APP_ROOT=/opt/app
+STATE_DIR=$APP_ROOT/state
+LOCK_FILE=$APP_ROOT/deploy.lock
+UPSTREAM_FILE=/etc/nginx/app-upstream.conf
+APP_LABEL=adp.app=aws-deploy-pipeline
+CONTAINER_PORT=8000
+SWITCH_TIMEOUT_SECONDS=15
+
+log() { printf '%s deploy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+# ---- inputs -----------------------------------------------------------------
+sha=${1:-}
+[[ $sha =~ ^[0-9a-f]{40}$ ]] || die "usage: deploy <40-hex git sha>"
+[[ $EUID -eq 0 ]] || die "must run as root"
+[[ -r $ENV_FILE ]] || die "$ENV_FILE not found (written by Ansible)"
+
+# KEY=VALUE lines only; the file is read as data, not executed. A value already
+# set in the environment wins, so a test can shorten HEALTH_TIMEOUT_SECONDS.
+while IFS='=' read -r key value; do
+  case $key in
+    IMAGE_REPO | REGISTRY_AUTH | SECRETS_SOURCE | SECRET_PARAMETER | APP_ENV | \
+      HEALTH_TIMEOUT_SECONDS | APP_DOMAIN | TLS_CA_FILE)
+      [[ -n ${!key:-} ]] || printf -v "$key" '%s' "$value"
+      ;;
+  esac
+done < "$ENV_FILE"
+
+: "${IMAGE_REPO:?missing in $ENV_FILE}" "${APP_ENV:?missing in $ENV_FILE}" "${APP_DOMAIN:?missing in $ENV_FILE}"
+REGISTRY_AUTH=${REGISTRY_AUTH:-none}
+SECRETS_SOURCE=${SECRETS_SOURCE:-none}
+HEALTH_TIMEOUT_SECONDS=${HEALTH_TIMEOUT_SECONDS:-60}
+[[ $HEALTH_TIMEOUT_SECONDS =~ ^[0-9]+$ ]] || die "HEALTH_TIMEOUT_SECONDS must be a number"
+image=$IMAGE_REPO:$sha
+
+# ---- one deploy at a time -----------------------------------------------------
+exec 9> "$LOCK_FILE"
+flock -n 9 || die "another deploy is running (lock: $LOCK_FILE)"
+
+# ---- slots --------------------------------------------------------------------
+# The active slot is whatever Nginx points at; the release goes to the other one.
+slot_port() { [[ $1 == A ]] && echo 8001 || echo 8002; }
+slot_name() { [[ $1 == A ]] && echo adp-app-a || echo adp-app-b; }
+
+if grep -q '127\.0\.0\.1:8002;' "$UPSTREAM_FILE"; then
+  old_slot=B new_slot=A
+elif grep -q '127\.0\.0\.1:8001;' "$UPSTREAM_FILE"; then
+  old_slot=A new_slot=B
+else
+  die "cannot tell the active slot from $UPSTREAM_FILE"
+fi
+new_port=$(slot_port "$new_slot")
+new_name=$(slot_name "$new_slot")
+old_name=$(slot_name "$old_slot")
+
+# ---- failure handling ---------------------------------------------------------
+# Anything that goes wrong before "released" lands here: put Nginx back if it
+# was switched, remove the new container, leave the old one alone.
+started=false switched=false released=false
+upstream_backup=""
+on_exit() {
+  local rc=$?
+  $released && return
+  trap - EXIT
+  if $switched && [[ -n $upstream_backup ]]; then
+    log "restoring the previous Nginx upstream"
+    cp -p "$upstream_backup" "$UPSTREAM_FILE.tmp" && mv -f "$UPSTREAM_FILE.tmp" "$UPSTREAM_FILE"
+    if ! { nginx -t -q && systemctl reload nginx; }; then
+      log "ERROR: could not restore Nginx; check it by hand" >&2
+    fi
+  fi
+  if $started; then
+    log "removing the failed container $new_name; last log lines:"
+    docker logs --tail 20 "$new_name" 2>&1 | sed 's/^/    /' || true
+    docker rm -f "$new_name" > /dev/null 2>&1 || true
+  fi
+  [[ -n $upstream_backup ]] && rm -f "$upstream_backup"
+  log "FAILED: $sha was not released; slot $old_slot is unchanged"
+  exit $((rc == 0 ? 1 : rc))
+}
+trap on_exit EXIT
+
+log "release $sha -> slot $new_slot (127.0.0.1:$new_port); active slot is $old_slot"
+
+# ---- image --------------------------------------------------------------------
+case $REGISTRY_AUTH in
+  none) ;;
+  ecr)
+    registry=${IMAGE_REPO%%/*}
+    [[ $registry =~ \.ecr\.([a-z0-9-]+)\.amazonaws\.com$ ]] || die "IMAGE_REPO is not an ECR repository"
+    aws ecr get-login-password --region "${BASH_REMATCH[1]}" |
+      docker login --username AWS --password-stdin "$registry" > /dev/null
+    ;;
+  *) die "REGISTRY_AUTH must be ecr or none" ;;
+esac
+log "pulling $image"
+docker pull -q "$image" > /dev/null
+
+# ---- secret: held in this shell's memory only, never written or printed --------
+secret_args=()
+case $SECRETS_SOURCE in
+  none) ;;
+  ssm)
+    : "${SECRET_PARAMETER:?missing in $ENV_FILE}"
+    DEMO_SECRET=$(aws ssm get-parameter --name "$SECRET_PARAMETER" --with-decryption \
+      --query Parameter.Value --output text)
+    export DEMO_SECRET
+    # Name only: docker reads the value from the environment, so it never
+    # appears on a command line.
+    secret_args=(-e DEMO_SECRET)
+    ;;
+  *) die "SECRETS_SOURCE must be ssm or none" ;;
+esac
+
+# ---- start in the inactive slot -------------------------------------------------
+# A container already in this slot is a leftover: Nginx does not point at it.
+docker rm -f "$new_name" > /dev/null 2>&1 || true
+started=true
+docker run -d --name "$new_name" \
+  -p "127.0.0.1:$new_port:$CONTAINER_PORT" \
+  -e HOST=0.0.0.0 -e "PORT=$CONTAINER_PORT" -e "APP_ENV=$APP_ENV" -e "GIT_SHA=$sha" \
+  "${secret_args[@]+"${secret_args[@]}"}" \
+  --label "$APP_LABEL" --label "adp.sha=$sha" --label "adp.slot=$new_slot" \
+  --restart unless-stopped --stop-timeout 15 \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  --memory 384m --pids-limit 256 \
+  --log-opt max-size=10m --log-opt max-file=5 \
+  "$image" > /dev/null
+unset DEMO_SECRET
+
+# ---- health gate ----------------------------------------------------------------
+log "waiting up to ${HEALTH_TIMEOUT_SECONDS}s for http://127.0.0.1:$new_port/health"
+deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+healthy=false
+while ((SECONDS < deadline)); do
+  if [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$new_port/health" || true) == 200 ]]; then
+    healthy=true
+    break
+  fi
+  # A container that exited or is being restarted will not get healthy: stop waiting.
+  read -r status restarts < <(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$new_name")
+  if [[ $status != running || $restarts -gt 0 ]]; then
+    die "container is not staying up (status=$status restarts=$restarts)"
+  fi
+  sleep 1
+done
+$healthy || die "health check did not return 200 within ${HEALTH_TIMEOUT_SECONDS}s"
+log "healthy"
+
+# ---- switch Nginx -----------------------------------------------------------------
+upstream_backup=$(mktemp "$UPSTREAM_FILE.prev.XXXXXX")
+cp -p "$UPSTREAM_FILE" "$upstream_backup"
+printf 'server 127.0.0.1:%s;\n' "$new_port" > "$UPSTREAM_FILE.tmp"
+chmod 0644 "$UPSTREAM_FILE.tmp"
+switched=true
+mv -f "$UPSTREAM_FILE.tmp" "$UPSTREAM_FILE"
+nginx -t -q || die "nginx rejected the new upstream"
+systemctl reload nginx
+
+# The reload is asynchronous: wait until Nginx itself serves this release.
+ca_args=()
+[[ -n ${TLS_CA_FILE:-} ]] && ca_args=(--cacert "$TLS_CA_FILE")
+deadline=$((SECONDS + SWITCH_TIMEOUT_SECONDS))
+serving=false
+while ((SECONDS < deadline)); do
+  if curl -fsS --max-time 3 "${ca_args[@]+"${ca_args[@]}"}" \
+    --resolve "$APP_DOMAIN:443:127.0.0.1" "https://$APP_DOMAIN/version" 2> /dev/null | grep -q "$sha"; then
+    serving=true
+    break
+  fi
+  sleep 0.5
+done
+$serving || die "Nginx did not serve $sha within ${SWITCH_TIMEOUT_SECONDS}s of the switch"
+log "Nginx is serving $sha from slot $new_slot"
+
+# ---- record state: from here the release is live, so nothing below may undo it --
+released=true
+rm -f "$upstream_backup"
+write_state() { # file, content
+  printf '%s\n' "$2" > "$STATE_DIR/.$1.tmp"
+  mv -f "$STATE_DIR/.$1.tmp" "$STATE_DIR/$1"
+}
+old_sha=$(head -n1 "$STATE_DIR/current" 2> /dev/null || true)
+if [[ -n $old_sha && $old_sha != "$sha" ]]; then
+  cp -p "$STATE_DIR/current" "$STATE_DIR/.previous.tmp"
+  mv -f "$STATE_DIR/.previous.tmp" "$STATE_DIR/previous"
+fi
+write_state current "$sha
+slot=$new_slot deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ---- retire the old slot (SIGTERM drains in-flight requests) ----------------------
+if docker inspect "$old_name" > /dev/null 2>&1; then
+  log "stopping slot $old_slot"
+  docker stop "$old_name" > /dev/null || log "WARNING: could not stop $old_name" >&2
+  docker rm "$old_name" > /dev/null || true
+fi
+
+# Keep only the current and previous images so the disk does not fill up.
+keep_previous=$(head -n1 "$STATE_DIR/previous" 2> /dev/null || true)
+while read -r tag; do
+  [[ $tag == "$sha" || $tag == "$keep_previous" || $tag == "<none>" ]] && continue
+  docker rmi "$IMAGE_REPO:$tag" > /dev/null 2>&1 || true
+done < <(docker images --format '{{.Tag}}' "$IMAGE_REPO")
+
+log "RELEASED: $sha (previous: ${old_sha:-none})"

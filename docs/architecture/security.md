@@ -102,9 +102,45 @@ container ── reads env at start ── app validates, never logs it
 |---|---|---|
 | Branch protection on `main` not confirmed | High | Human action before Phase 8 |
 | Single instance, single AZ: no HA | Medium | Accepted (ADR 0001) |
-| Dependencies pinned by version but not by hash (`--require-hashes`) | Medium | Revisit in Phase 7. Trivy covers known CVEs, not substitution |
+| Dependencies pinned by version but not by hash (`--require-hashes`) | Medium | Revisited 2026-11-13 and still open: the image installs with `--no-deps` from the fully pinned `requirements.txt`, but without hashes. Trivy covers known CVEs, not substitution |
+| 11 unfixed HIGH CVEs in the base image's OS packages (§6) | Medium | Dated exception, 2026-11-13. Re-scan on every base-image bump and in CI (Phase 8) |
+| The image's OS layer runs `apt-get upgrade`, so two builds of the same SHA on different days can differ | Low | Accepted: ECR tags are immutable, so a released SHA is built once. The alternative is shipping known-fixed CVEs until the base image is republished |
 | Open egress from the instance | Low | Accepted. Revisit if the app starts handling sensitive data |
 | `/version` publicly reveals the deployed git SHA | Low | Accepted: the repo is the source of truth anyway, and it is useful for verifying deploys |
 | No WAF or rate limiting | Low | Nginx `limit_req` can be added in Phase 6 if needed |
-| Docker `json-file` logs are unbounded by default | Medium (disk-full outage) | Set `log-opts max-size/max-file` in `daemon.json` in Phase 6 |
+| Docker `json-file` logs are unbounded by default | — | Closed 2026-11-13: `daemon.json` and the deploy script both cap them at 10m × 5 (checked on the local machine) |
 | Root/admin access of the AWS account itself | — | Outside this repo. Human responsibility |
+
+## 6. Image scan results
+
+Scanned 2026-11-13 with Trivy 0.76.2, run from its pinned image (Trivy is not installed on the Mac):
+
+```bash
+docker build -t adp-local:dev .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v adp-trivy-cache:/root/.cache \
+  aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image adp-local:dev
+```
+
+Image: `python:3.12.14-slim-trixie` pinned by digest, Debian 13.7, 234 MB (`docker images`; the base alone is about 176 MB).
+
+| | CRITICAL | HIGH | MEDIUM | LOW |
+|---|---|---|---|---|
+| First build (base image as published) | 0 | 55 | 120 OS + 5 Python | 71 OS + 1 Python |
+| Current Dockerfile (`apt-get upgrade`, system pip removed) | **0** | **47** | 89 | 65 |
+
+The upgrade closed the HIGH findings that had a Debian fix (apt, pcre2, openssl, zlib). Removing the unused system `pip` closed every Python finding; the app's own dependencies have none. The planned CI gate (fail on CRITICAL, Phase 8) would pass.
+
+The 47 remaining HIGH findings are 11 CVEs counted once per binary package. **None has a fixed version in Debian 13** (Trivy status `affected` or `fix_deferred`), so there is nothing to upgrade to.
+
+| CVE | Source package | What it is | Why it is accepted here |
+|---|---|---|---|
+| CVE-2026-76642, -78408, -78409, -78410 | util-linux (9 binary packages) | Flaws in `mount` helpers and `nsenter` | The app never runs these tools. The container runs as uid 10001 with all capabilities dropped and `no-new-privileges`, so it cannot mount or enter namespaces |
+| CVE-2026-119373, -119374, -119379 | sqlite3 | Memory corruption from a crafted FTS5 index or session changeset | The app does not open any SQLite database. The library is present only because Python links to it |
+| CVE-2025-69720 | ncurses (4 binary packages) | Buffer overflow | No terminal UI in the app; nothing calls ncurses at run time |
+| CVE-2026-16742 | systemd (`libsystemd0`, `libudev1`) | Privilege escalation in `systemd-homed` | Only the client libraries are in the image; there is no systemd or `homed` running in the container |
+| CVE-2026-54369 | acl | Symlink traversal through libacl functions | Nothing in the app sets ACLs; the root filesystem is mounted read-only |
+| CVE-2026-9538 | perl (`perl-base`) | Denial of service in `Archive::Tar` | Perl is a Debian essential package and is never run by the app. Debian marked the fix as deferred |
+
+Severity of the exception: Medium. These are reasons the findings are hard to reach, not proof they are unreachable, and they rest on the run-time options the deploy script sets (non-root, read-only root, `--cap-drop ALL`, `no-new-privileges`). A distroless or Alpine base would remove most of these packages; that is a possible later change, not done here.
+
+Review trigger: any base-image digest change, any CRITICAL finding, or a fix becoming available for one of the CVEs above.
