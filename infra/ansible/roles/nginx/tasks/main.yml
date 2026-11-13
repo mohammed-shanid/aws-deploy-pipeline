@@ -1,0 +1,79 @@
+- name: Check the TLS settings
+  ansible.builtin.assert:
+    that:
+      - tls_mode in ['selfsigned', 'letsencrypt']
+      - not (tls_mode == 'letsencrypt' and env_name == 'local')
+    fail_msg: >-
+      tls_mode must be selfsigned or letsencrypt, and letsencrypt is not allowed
+      when env_name is local (got tls_mode={{ tls_mode }}, env_name={{ env_name }})
+    quiet: true
+
+- name: Stop if Let's Encrypt is requested (not implemented until the AWS phase)
+  ansible.builtin.fail:
+    msg: tls_mode=letsencrypt is added with the AWS inventory (roadmap Day 5); only selfsigned works today
+  when: tls_mode == 'letsencrypt'
+
+- name: Install Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create a self-signed certificate
+  ansible.builtin.import_tasks: selfsigned.yml
+  when: tls_mode == 'selfsigned'
+
+- name: Create the ACME challenge directory
+  ansible.builtin.file:
+    path: "{{ nginx_acme_webroot }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Initial content only: the deploy script owns this file afterwards, so a later
+# playbook run must not point Nginx back at slot A.
+- name: Point the upstream at slot A if no deploy has chosen a slot yet
+  ansible.builtin.copy:
+    content: "server 127.0.0.1:{{ nginx_slot_a_port }};\n"
+    dest: "{{ nginx_upstream_file }}"
+    force: false
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Install the site configuration
+  ansible.builtin.template:
+    src: app.conf.j2
+    dest: /etc/nginx/conf.d/app.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Remove the default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+- name: Rotate Nginx logs
+  ansible.builtin.template:
+    src: logrotate-nginx.j2
+    dest: /etc/logrotate.d/nginx
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Test the Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false # read-only
+  check_mode: false
+
+- name: Enable and start Nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started

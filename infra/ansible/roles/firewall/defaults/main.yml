@@ -1,0 +1,4 @@
+# Mirrors the security group: 80/443 only. 22 stays closed unless break-glass
+# needs it, and then only from one /32.
+firewall_public_tcp_ports: [80, 443]
+firewall_ssh_cidr: "" # e.g. 203.0.113.7/32; empty = port 22 closed

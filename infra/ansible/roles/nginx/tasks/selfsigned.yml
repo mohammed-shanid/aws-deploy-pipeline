@@ -1,0 +1,48 @@
+# Local harness only. The certificate is not renewed automatically: when it
+# expires, delete it and run the playbook again.
+- name: Install the Python cryptography library (for the certificate modules)
+  ansible.builtin.apt:
+    name: python3-cryptography
+    state: present
+
+- name: Create the certificate directory
+  ansible.builtin.file:
+    path: "{{ tls_cert_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Generate the private key
+  community.crypto.openssl_privatekey:
+    path: "{{ tls_key_path }}"
+    type: ECC
+    curve: secp256r1
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Generate the certificate request with the domain as a subjectAltName
+  community.crypto.openssl_csr:
+    path: "{{ tls_cert_path | splitext | first }}.csr"
+    privatekey_path: "{{ tls_key_path }}"
+    common_name: "{{ app_domain }}"
+    subject_alt_name: "DNS:{{ app_domain }}"
+    key_usage: [digitalSignature]
+    key_usage_critical: true
+    extended_key_usage: [serverAuth]
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Self-sign the certificate
+  community.crypto.x509_certificate:
+    path: "{{ tls_cert_path }}"
+    csr_path: "{{ tls_cert_path | splitext | first }}.csr"
+    privatekey_path: "{{ tls_key_path }}"
+    provider: selfsigned
+    selfsigned_not_after: "+{{ nginx_selfsigned_days }}d"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx

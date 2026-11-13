@@ -1,0 +1,11 @@
+# Host configuration. Local: infra/ansible/tests/idempotence.sh. AWS inventory: Day 5.
+- name: Configure the application host
+  hosts: all
+  become: true
+  roles:
+    - base
+    - ssh
+    - firewall
+    - docker
+    - nginx
+    - app_deploy

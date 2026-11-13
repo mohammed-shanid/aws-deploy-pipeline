@@ -1,0 +1,4 @@
+// {{ ansible_managed }}
+// Ubuntu's stock 50unattended-upgrades limits this to the security pocket.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";

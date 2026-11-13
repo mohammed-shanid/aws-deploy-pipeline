@@ -1,0 +1,7 @@
+nginx_slot_a_port: 8001
+nginx_slot_b_port: 8002
+nginx_upstream_file: /etc/nginx/app-upstream.conf # rewritten by the deploy script
+nginx_acme_webroot: /var/www/acme
+nginx_selfsigned_days: 825
+nginx_hsts_max_age: 31536000
+nginx_log_rotate_days: 14

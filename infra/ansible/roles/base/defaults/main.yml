@@ -1,0 +1,7 @@
+base_timezone: Etc/UTC
+base_packages:
+  - ca-certificates
+  - curl
+  - logrotate
+  - tzdata
+  - unattended-upgrades

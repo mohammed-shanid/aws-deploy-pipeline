@@ -1,0 +1,12 @@
+docker_major_version: 29 # checked 2026-11-13: latest in Docker's noble repo is 29.9.3
+# sha256 of https://download.docker.com/linux/ubuntu/gpg, checked 2026-11-13.
+# A mismatch means Docker rotated its key: verify the new fingerprint, then update.
+docker_apt_key_sha256: 1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+# Container logs (the app's JSON lines) are rotated by Docker, not logrotate.
+docker_log_max_size: 10m
+docker_log_max_file: 5

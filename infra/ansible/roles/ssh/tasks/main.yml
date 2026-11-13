@@ -1,0 +1,44 @@
+# Port 22 is closed in the security group and ufw; sshd stays installed for the
+# break-glass path (deployment.md §5), so it is hardened anyway.
+- name: Install the OpenSSH server
+  ansible.builtin.apt:
+    name: openssh-server
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Ubuntu 24.04 socket-activates sshd, so /run/sshd does not exist until the
+# service has started once, and `sshd -t` (the validation below) fails without it.
+- name: Enable and start the ssh service
+  ansible.builtin.systemd_service:
+    name: ssh
+    enabled: true
+    state: started
+
+# sshd uses the first value it reads, so 00- wins over later drop-ins such as
+# 50-cloud-init.conf. The file is validated before it replaces the old one.
+- name: Install the sshd hardening drop-in
+  ansible.builtin.template:
+    src: 00-adp-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/00-adp-hardening.conf
+    owner: root
+    group: root
+    mode: "0600"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload ssh
+
+- name: Read the effective sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -T
+  register: ssh_effective
+  changed_when: false # read-only
+  check_mode: false
+
+- name: Assert the hardening is in effect (the whole config, not only the drop-in)
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in ssh_effective.stdout_lines"
+      - "'passwordauthentication no' in ssh_effective.stdout_lines"
+      - "'kbdinteractiveauthentication no' in ssh_effective.stdout_lines"
+      - "'pubkeyauthentication yes' in ssh_effective.stdout_lines"
+      - "'permitemptypasswords no' in ssh_effective.stdout_lines"
+    quiet: true

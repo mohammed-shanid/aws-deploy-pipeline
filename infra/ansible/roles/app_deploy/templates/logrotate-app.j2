@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+{{ app_deploy_log_dir }}/*.log {
+    weekly
+    missingok
+    rotate {{ app_deploy_log_rotate_weeks }}
+    compress
+    delaycompress
+    notifempty
+}
