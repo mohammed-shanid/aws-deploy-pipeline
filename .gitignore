@@ -13,7 +13,11 @@ tfplan
 
 # Python
 .venv/
+.venv-infra/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Local test harness
+.harness/
