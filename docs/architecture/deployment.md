@@ -1,6 +1,6 @@
 # Deployment and rollback
 
-Status: **design only**. The workflows (Phase 8), deploy script (Phase 8, installed by Ansible) and SSM document (Phase 5/8) do not exist yet. Paths and names below are the planned contract; the implementing phase must keep them or update this file. The local test harness (§6) exists and encodes part of this contract as tests. Last reviewed: 2026-10-24.
+Status: **the on-host part exists and is tested locally; nothing is on AWS.** The deploy script, the watchdog and the Dockerfile are implemented and pass the local harness (§6.4, 2026-11-13). The workflows and the SSM document do not exist yet, and the `ecr` and `ssm` branches of the deploy script have never run. Paths and names below are the contract; a change to them must update this file. Last reviewed: 2026-11-13.
 
 ## 1. Release identity
 
@@ -36,6 +36,11 @@ Inputs come from `/etc/app/deploy.env`, written by Ansible:
 | `SECRETS_SOURCE` | `ssm` | `none` | No Parameter Store locally. The app runs with `APP_ENV=dev`, where `DEMO_SECRET` is optional |
 | `APP_ENV` | `dev` (the AWS environment name) | `dev` | |
 | `HEALTH_TIMEOUT_SECONDS` | `60` | `60`; the rollback test overrides it to 20 via the environment | Shorter test runs |
+| `SECRET_PARAMETER` | `/<project>/<env>/DEMO_SECRET` | empty | Only read when `SECRETS_SOURCE=ssm` |
+| `APP_DOMAIN` | the real domain | `app.adp.test` | After the switch the script requests `/version` through Nginx under this name |
+| `TLS_CA_FILE` | empty (system trust store; Let's Encrypt) | `/etc/ssl/adp/app.crt` | The self-signed certificate is trusted explicitly; verification is never turned off |
+
+The file is parsed as `KEY=VALUE` data, not executed, and a value already in the environment wins.
 
 Everything else, including the health gate, the slot switch and the state files, is the same code on both, which is what makes the local rollback test meaningful.
 
@@ -43,9 +48,9 @@ Everything else, including the health gate, the slot switch and the state files,
 2. Validate `sha` against `^[0-9a-f]{40}$`. The SSM document validates it too; this is a second check.
 3. `docker pull <ecr>/<repo>:<sha>`.
 4. Read `DEMO_SECRET` from Parameter Store into a shell variable (security.md §4).
-5. Start the container in the **inactive** slot: `-p 127.0.0.1:<slot port>:8000`, `-e HOST=0.0.0.0 -e APP_ENV -e GIT_SHA -e DEMO_SECRET`, `--stop-timeout 15` (longer than the app's 10 s graceful window), `--restart unless-stopped`, `--label adp.app=aws-deploy-pipeline` (how tests and operators find app containers), and log rotation options.
-6. Poll `http://127.0.0.1:<slot port>/health` until it returns 200, for up to N s (default 60). The app returns 503 until its startup has completed, so a 200 means it is ready.
-7. **Success**: rewrite the upstream file → `nginx -t` → `systemctl reload nginx` → check `/health` through Nginx → `docker stop` the old slot (SIGTERM, which drains requests) → write state.
+5. Start the container in the **inactive** slot (containers are named `adp-app-a` / `adp-app-b`; a leftover container in that slot is removed first): `-p 127.0.0.1:<slot port>:8000`, `-e HOST=0.0.0.0 -e APP_ENV -e GIT_SHA -e DEMO_SECRET`, `--stop-timeout 15` (longer than the app's 10 s graceful window), `--restart unless-stopped`, `--label adp.app=aws-deploy-pipeline` (how tests and operators find app containers), log rotation options, and hardening: `--read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --memory 384m --pids-limit 256`.
+6. Poll `http://127.0.0.1:<slot port>/health` until it returns 200, for up to N s (default 60). The app returns 503 until its startup has completed, so a 200 means it is ready. If the container exits or Docker restarts it, the script stops waiting at once.
+7. **Success**: rewrite the upstream file → `nginx -t` → `systemctl reload nginx` → wait up to 15 s until `/version` **through Nginx** (TLS verified) returns the new SHA → write state → `docker stop` and remove the old slot (SIGTERM, which drains requests) → delete images of this repo other than current and previous.
 8. **Failure** at any step: remove the new container, leave the old slot serving untouched, and exit non-zero. If the failure happened *after* the Nginx switch, restore the previous upstream file and reload first.
 
 State: `/opt/app/state/current` and `/opt/app/state/previous`. Each is written atomically (temp file, then `mv`). The first line is the SHA; later lines may hold the slot and timestamp:
@@ -57,7 +62,11 @@ slot=<A|B> deployed_at=<ts>
 
 A failed deploy changes neither file. The local rollback test asserts this.
 
-Because the state lives on the host, rollback never depends on CI.
+Because the state lives on the host, rollback never depends on CI. Redeploying the SHA that is already current leaves `previous` alone.
+
+### Watchdog (`/opt/app/bin/watchdog`)
+
+A crash is handled by `--restart unless-stopped`. A **hang** is not: the process is up and the port is open, but nothing answers. The image's `HEALTHCHECK` (every 10 s, 3 failures) makes Docker mark such a container `unhealthy`, but Docker never restarts it. `adp-watchdog.timer` runs the watchdog every 30 s; it restarts any app container that is `unhealthy`. It takes the deploy lock without waiting and does nothing while a deploy is running, so it cannot interfere with a release that is still starting. Measured locally with the app process frozen by `SIGSTOP`: unhealthy after 36 s, serving again after 57 s (that includes the 15 s stop timeout). Requests fail during that window; one instance has nothing to fail over to (ADR 0001).
 
 ## 3. Automatic rollback
 
@@ -176,5 +185,11 @@ terraform -chdir=infra/terraform/envs/dev show -json tfplan | jq -r '
 | 2026-11-13 | State of the machine after the run, checked by hand | **Tested and passed**: `sshd -T` shows `permitrootlogin no`, `passwordauthentication no`, `kbdinteractiveauthentication no`; `ufw status` default deny incoming with only 80/tcp and 443/tcp allowed; from the Mac to the machine's IP, 22 and 8001 are unreachable and 80/443 open (so ufw does filter in an OrbStack machine); Docker 29.9.3 from Docker's repo, `json-file` logs capped at 10m × 5, the `deploy` user (locked password) can run `docker ps`; certificate `CN=app.adp.test` with SAN `DNS:app.adp.test`, key mode 0600; `/etc/app/deploy.env` holds the five variables from §2 |
 | 2026-11-13 | Nginx behaviour, `curl` inside the machine with `--cacert /etc/ssl/adp/app.crt` (verification on) | **Tested and passed**: port 80 returns 301 to `https://app.adp.test/...` even with `Host: evil.example`; 443 returns 502 with no app running, carrying HSTS, `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy` and CSP headers; 200 through a throwaway `python3 -m http.server` on `127.0.0.1:8001`; a request for another hostname fails certificate verification; TLS 1.1 is refused |
 | 2026-11-13 | `tls_mode: letsencrypt`, the AWS inventory, Ansible over SSM | **Not implemented**: the nginx role fails on purpose if `letsencrypt` is requested (always when `env_name` is `local`). Roadmap Day 5 |
-| 2026-11-13 | `deploy_rollback.sh` | **Blocked**: needs the Dockerfile and `/opt/app/bin/deploy` (roadmap Day 3) |
+| 2026-11-13 | Dockerfile: build, run with `APP_ENV=dev`, on the Mac (Docker 29.8.2, amd64) | **Tested and passed**: `/health` 200, `/version` returns the `GIT_SHA` passed in, `id` is uid 10001, Docker health `healthy`, `docker stop` returns in 0.5 s with "Application shutdown complete" in the log; without `APP_ENV` it exits 2 (fails closed). App tests before and after: 14 passed; `ruff check .` clean |
+| 2026-11-13 | Trivy 0.76.2 on the image | **Tested**: 0 CRITICAL, 47 HIGH (11 CVEs, none with a Debian fix). Each is written up with a dated exception in [security.md §6](security.md#6-image-scan-results) |
+| 2026-11-13 | `idempotence.sh --fresh` with the deploy script, watchdog and units added to `app_deploy`; shellcheck 0.11.0 on both scripts; `ansible-lint` | **Tested and passed**: run 1 `changed=38`, run 2 `changed=0`; shellcheck and lint clean |
+| 2026-11-13 | `deploy_rollback.sh` (image built inside the machine from the working tree, tagged with HEAD `9072a5a`; fixtures built on top of it) | **Tested and passed**, unedited: good release deployed and served through Nginx/TLS; `health500` deploy exited 1 after the 20 s gate with 89/89 requests still served by the good release; `crash` deploy exited 1 after 2 s (restart loop detected) with 8/8; state files unchanged, no broken container left |
+| 2026-11-13 | Beyond the harness, run by hand in the machine | **Tested and passed**: a second good release switched B → A while 50 requests were in flight, 0 failed (24 old SHA, 26 new); `current`/`previous` recorded; manual rollback with `deploy $(head -n1 state/previous)` worked; a non-SHA argument and a second concurrent deploy were both refused with exit 1; the container runs as uid 10001 with a read-only root and all capabilities dropped; after the deploys a playbook run still reports `changed=0` and does not reset the upstream file |
+| 2026-11-13 | Watchdog, app process frozen with `SIGSTOP` | **Tested and passed**: Nginx stopped getting answers, Docker reported `unhealthy` after 36 s, the watchdog restarted the container and `/health` was 200 again after 57 s. One run, not repeated |
+| 2026-11-13 | Deploy script with `REGISTRY_AUTH=ecr` and `SECRETS_SOURCE=ssm`; the AWS CLI on the host | **Implemented, not tested**: no ECR or Parameter Store locally (§6.2). Nothing installs the AWS CLI on the host yet. First real run is the first AWS deploy |
 | 2026-10-24 | `ci.yml` `iac` job | **Implemented, not run on GitHub**. Its Terraform step was run locally under bash: warns and skips while `envs/dev` has no `*.tf`, and runs validate + test once it does |
