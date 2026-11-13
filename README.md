@@ -2,7 +2,7 @@
 
 An end-to-end AWS deployment pipeline for a small Python service, built to be deployed, broken on purpose, diagnosed and recovered. Terraform builds the network, host, IAM and state. Ansible configures the host. Docker runs the app. GitHub Actions builds and deploys it through OIDC and SSM, with automatic rollback. CloudWatch watches it. The app ([`app/`](app/)) is intentionally minimal (`/health`, `/version` and an index page), so the work is in the infrastructure around it.
 
-**Status, 2026-10-28: nothing is deployed to AWS yet.** What exists today: the app and its tests, the design docs and ADRs, and local guardrail tests written *before* the Terraform they check. Everything below separates what has been run from what is planned.
+**Status, 2026-11-13: nothing is deployed to AWS yet.** What exists today: the app and its tests, the design docs and ADRs, local guardrail tests written *before* the Terraform they check, and a CI workflow that has run green on GitHub. Everything below separates what has been run from what is planned.
 
 ## Architecture
 
@@ -87,7 +87,7 @@ Only items with evidence in this repo. Labels: **tested and passed** / **impleme
 | The Terraform guardrail tests catch what they claim to: required tags, no SSH by default, /32-only SSH, IMDSv2 with hop limit 1, encrypted EBS, OIDC trust pinned to this repo's `main` | [`guardrails.tftest.hcl`](infra/terraform/envs/dev/tests/guardrails.tftest.hcl) against a minimal [fixture](infra/tests/terraform_mutation/fixture/main.tf): 6/6 runs pass. [`mutate.py`](infra/tests/terraform_mutation/mutate.py) breaks one rule at a time, and each of the **18 mutations** fails exactly the run named for it (2026-10-24, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed |
 | The custom checkov policy `CKV_ADP_1` (required tags on every AWS provider) works | [`required_default_tags.py`](infra/terraform/checkov/required_default_tags.py): passes on the fixture, and catches 4 tag mutations (same `mutate.py` run) | Tested and passed |
 | checkov passes on the real Terraform | There is no real Terraform yet (`infra/terraform/envs/dev` holds only its tests), so checkov currently scans nothing. Its exit 0 proves nothing | Blocked until Day 4 |
-| CI runs these checks on every PR | [`ci.yml`](.github/workflows/ci.yml) is written but has **never run on GitHub** | Implemented, not tested |
+| CI runs on every PR | [`ci.yml`](.github/workflows/ci.yml) first ran on [PR #1](https://github.com/mohammed-shanid/aws-deploy-pipeline/pull/1): [run 43372145619](https://github.com/mohammed-shanid/aws-deploy-pipeline/actions/runs/43372145619) passed in 47s (2026-11-13). It ran `terraform fmt` and checkov; the guardrail tests were **skipped** (by design) because `envs/dev` has no Terraform yet, so this proves the pipeline works, not the guardrails. App tests are not in CI yet (Phase 8) | Tested and passed (pipeline only) |
 
 The guardrail tests are the spec the real Terraform must meet; they are not evidence about AWS. Nothing about Ansible, Docker, deploy/rollback or AWS is proven yet. The Ansible and rollback test scripts exist in [`infra/ansible/tests/`](infra/ansible/tests/), but there is nothing for them to run against until Days 2–3.
 
@@ -95,7 +95,7 @@ The guardrail tests are the spec the real Terraform must meet; they are not evid
 
 | Day | Deliverable | Status | Done when |
 |---|---|---|---|
-| 1 | Demo app + tests, architecture docs, ADRs 0001–0005, local test harness, `ci.yml` | In progress | `ci.yml` passes on GitHub |
+| 1 | Demo app + tests, architecture docs, ADRs 0001–0005, local test harness, `ci.yml` | Done (2026-11-13, [CI run](https://github.com/mohammed-shanid/aws-deploy-pipeline/actions/runs/43372145619)) | `ci.yml` passes on GitHub |
 | 2 | Ansible roles (base, ssh, firewall, docker, nginx with self-signed TLS) on a local OrbStack Ubuntu 24.04 machine | Planned | `idempotence.sh --fresh` and each `--role` report `changed=0` on the second run |
 | 3 | Dockerfile, on-host deploy script (two slots, health gate, automatic rollback), watchdog, all local | Planned | `deploy_rollback.sh` passes; Trivy findings written up |
 | 4 | Terraform on AWS: bootstrap (state bucket, budget), then dev env (VPC, SG, EC2, IAM, ECR, OIDC) | Planned | `terraform test` and checkov pass on the real config, the `tags_all` check prints nothing, the instance shows Online in SSM |
@@ -129,7 +129,7 @@ Full threat model and IAM design: [security.md](docs/architecture/security.md).
 | `.env`, state, `*.tfvars` and `*.pem` are gitignored; only [`.env.example`](.env.example) with placeholders is committed | Instance role limited to SSM, ECR pull for this repo, CloudWatch, and reading `/<project>/<env>/*` (Day 4) |
 | App fails closed: it refuses to start without its secret outside `dev`, the secret is excluded from reprs, and request logs carry no query strings, headers or bodies ([`app/config.py`](app/config.py), [`app/main.py`](app/main.py)) | Security group 80/443 only, port 22 closed, ufw mirroring it, shell access through Session Manager (Days 2 and 4) |
 | Runtime and dev dependencies pinned to exact versions (not hashes) | Secret in Parameter Store, read at container start, never written to disk (Days 3 and 5) |
-| CI actions pinned to commit SHAs, `contents: read` only, no AWS credentials in PR checks ([`ci.yml`](.github/workflows/ci.yml); not yet run) | Non-root container with a pinned base image; Trivy fails the build on CRITICAL (Days 3 and 5) |
+| CI actions pinned to commit SHAs, `contents: read` only, no AWS credentials in PR checks ([`ci.yml`](.github/workflows/ci.yml); [first run passed](https://github.com/mohammed-shanid/aws-deploy-pipeline/actions/runs/43372145619) 2026-11-13) | Non-root container with a pinned base image; Trivy fails the build on CRITICAL (Days 3 and 5) |
 | Guardrail tests that the Terraform must pass: SSH closed by default, IMDSv2 with hop limit 1 (containers cannot reach instance credentials), encrypted EBS, `StringEquals` trust on `repo:mohammed-shanid/aws-deploy-pipeline:ref:refs/heads/main` | Branch protection on `main` (human action, before Day 5); AWS Budget alert (Day 4); cert-expiry alarm (Later) |
 
 ## Cost
