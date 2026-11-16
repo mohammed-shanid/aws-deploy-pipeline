@@ -69,8 +69,9 @@ Only list commands here after they have been run successfully in this repo.
 |---|---|
 | App tests | FILL |
 | App lint | FILL |
-| Terraform format / validate | `terraform fmt -check -recursive infra/terraform` · `terraform -chdir=infra/terraform/envs/<env> validate` |
-| Terraform plan | `terraform -chdir=infra/terraform/envs/<env> plan -out=tfplan` |
+| Terraform format / validate | `terraform fmt -check -recursive infra/terraform` · `terraform -chdir=infra/terraform/envs/<env> init -backend=false` then `... validate` (same for `infra/terraform/bootstrap`) |
+| Terraform guardrail tests / checkov | `terraform -chdir=infra/terraform/envs/dev test` · `.venv-infra/bin/checkov` (repo root) |
+| Terraform plan | `terraform -chdir=infra/terraform/envs/<env> plan -out=tfplan` (never run yet: needs AWS credentials; steps in `infra/terraform/README.md`) |
 | Terraform guardrail mutation check | `.venv/bin/python infra/tests/terraform_mutation/mutate.py` (~3 min) |
 | Ansible collections (once) | `.venv-infra/bin/ansible-galaxy collection install -r infra/ansible/collections/requirements.yml -p .ansible/collections` |
 | Ansible lint | `.venv-infra/bin/ansible-lint` (repo root; config in `.ansible-lint`) |

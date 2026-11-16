@@ -21,7 +21,7 @@ Hard rules referenced (R1–R9) are in [CLAUDE.md](../../CLAUDE.md).
 
 ## 2. IAM design
 
-Permissions are listed per action, with why each one is needed. Every `"Resource": "*"` below is on an action that **does not support resource-level permissions**. Each one is a documented exception under R4. Exact ARNs are filled in during Phase 5.
+Permissions are listed per action, with why each one is needed. Every `"Resource": "*"` below is on an action that **does not support resource-level permissions**. Each one is a documented exception under R4. Implemented in `infra/terraform/envs/dev/iam.tf` on 2026-11-14 (not applied yet); differences from this section are listed under each table.
 
 ### 2.1 Instance role (`<project>-<env>-instance`)
 
@@ -36,6 +36,8 @@ Permissions are listed per action, with why each one is needed. Every `"Resource
 | `logs:CreateLogStream`, `logs:PutLogEvents`, `logs:DescribeLogStreams` | this project's log group ARNs | Ship container and Nginx logs. Log groups are created by Terraform, so the agent needs no `CreateLogGroup` |
 
 Prefer this custom CloudWatch policy over the managed `CloudWatchAgentServerPolicy`, which grants `logs:*`-style writes on `*`.
+
+As implemented (2026-11-14): the role is `<project>-<env>-instance` with the managed SSM policy and one inline policy holding the three ECR pull actions, `ecr:GetAuthorizationToken` and `ssm:GetParameter`. **Not yet in the code:** the `cloudwatch:` and `logs:` rows (they arrive with the log groups, roadmap Day 6) and `kms:Decrypt` (left out; whether the `aws/ssm` key needs it is still unverified until the first deploy reads the secret).
 
 ### 2.2 CI deploy role (`<project>-<env>-gha-deploy`)
 
@@ -65,6 +67,8 @@ Trust policy (shape; exact text is shown to the human before Phase 8 merges):
 | `ssm:GetCommandInvocation`, `ssm:ListCommandInvocations` | `*` (R4 exception; read-only, no resource-level support) | Wait for and read the deploy result |
 
 No `ecr:BatchDeleteImage` (the lifecycle policy handles cleanup). No IAM permissions. No `ec2:*`.
+
+As implemented (2026-11-14): the role and its inline policy match this table exactly. The document is `aws_ssm_document.deploy` (`<project>-deploy`), whose only parameter `sha` has `allowedPattern ^[0-9a-f]{40}$`.
 
 ### 2.3 Human operator
 

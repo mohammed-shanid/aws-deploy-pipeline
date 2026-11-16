@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in. No secrets belong here.
+aws_region  = "ap-south-1" # must match backend.hcl and bootstrap
+project     = "aws-deploy-pipeline"
+environment = "dev"
+owner       = "your-name"
+
+# Break-glass only (deployment.md §5). Leave unset: port 22 stays closed.
+# operator_cidr = "203.0.113.7/32"
