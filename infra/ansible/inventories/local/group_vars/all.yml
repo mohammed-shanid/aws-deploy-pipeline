@@ -25,3 +25,5 @@ secrets_source: none # ssm | none
 
 # Local harness: user for the deploy tooling (also defined for AWS).
 deploy_user: deploy
+# Parameter Store name of DEMO_SECRET; unused when secrets_source is none.
+secret_parameter: ""

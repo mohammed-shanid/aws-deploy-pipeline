@@ -2,7 +2,7 @@
 
 An end-to-end AWS deployment pipeline for a small Python service, built to be deployed, broken on purpose, diagnosed and recovered. Terraform builds the network, host, IAM and state. Ansible configures the host. Docker runs the app. GitHub Actions builds and deploys it through OIDC and SSM, with automatic rollback. CloudWatch watches it. The app ([`app/`](app/)) is intentionally minimal (`/health`, `/version` and an index page), so the work is in the infrastructure around it.
 
-**Status, 2026-11-13: nothing is deployed to AWS yet.** What exists today: the app and its tests, the design docs and ADRs, local guardrail tests written *before* the Terraform they check, a CI workflow that has run green on GitHub, and Ansible roles that configure a local Ubuntu 24.04 machine (not AWS). Everything below separates what has been run from what is planned.
+**Status, 2026-11-13: nothing is deployed to AWS yet.** What exists today: the app and its tests, the design docs and ADRs, local guardrail tests written *before* the Terraform they check, a CI workflow that has run green on GitHub, Ansible roles that configure a local Ubuntu 24.04 machine, and a container image with a deploy script that rolls back automatically, tested on that local machine (not AWS). Everything below separates what has been run from what is planned.
 
 ## Architecture
 
@@ -90,8 +90,12 @@ Only items with evidence in this repo. Labels: **tested and passed** / **impleme
 | CI runs on every PR | [`ci.yml`](.github/workflows/ci.yml) first ran on [PR #1](https://github.com/mohammed-shanid/aws-deploy-pipeline/pull/1): [run 43372145619](https://github.com/mohammed-shanid/aws-deploy-pipeline/actions/runs/43372145619) passed in 47s (2026-11-13). It ran `terraform fmt` and checkov; the guardrail tests were **skipped** (by design) because `envs/dev` has no Terraform yet, so this proves the pipeline works, not the guardrails. App tests are not in CI yet (Phase 8) | Tested and passed (pipeline only) |
 | The Ansible roles (`base`, `ssh`, `firewall`, `docker`, `nginx`, `app_deploy`) configure a clean Ubuntu 24.04 host and are idempotent | [`idempotence.sh --fresh`](infra/ansible/tests/idempotence.sh) on a local OrbStack machine: run 1 `changed=35`, run 2 `changed=0`; each role alone also `changed=0` (on the already-configured machine, not from clean); `ansible-lint` production profile passes (2026-11-13, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed (local only) |
 | On that machine: ufw allows only 80/443, sshd refuses passwords and root, Docker is pinned to major 29, Nginx terminates TLS with security headers and proxies to slot A | Probed from the Mac: 22 and 8001 blocked, 80/443 open. `curl` with the self-signed cert as its only trust anchor: 301 on port 80, 502 with no app, 200 through a stand-in backend on `127.0.0.1:8001`, wrong hostname and TLS 1.1 refused (2026-11-13, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed (local only) |
+| A broken release never receives traffic, and the good one keeps serving | [`deploy_rollback.sh`](infra/ansible/tests/deploy_rollback.sh) on the local machine, unedited: a release whose `/health` returns 500 and one that crashes on start were both rejected (deploy exit 1) while 89/89 and 8/8 requests were served by the good release; state files unchanged (2026-11-13, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed (local only) |
+| A good release switches slots without dropping requests, and rollback works without CI | Run by hand on the local machine: 50 requests during a B → A switch, 0 failed; `deploy $(head -n1 /opt/app/state/previous)` restored the earlier SHA (2026-11-13, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed (local only, one run) |
+| A hung app is restarted automatically | App process frozen with `SIGSTOP`: Docker marked it unhealthy after 36 s, the [watchdog](infra/ansible/roles/app_deploy/files/watchdog) restarted it, serving again after 57 s (2026-11-13, [record](docs/architecture/deployment.md#64-harness-verification-record)) | Tested and passed (local only, one run) |
+| The image runs as non-root, has a working `HEALTHCHECK`, stops cleanly on SIGTERM and has no CRITICAL vulnerabilities | [`Dockerfile`](Dockerfile): uid 10001, `healthy`, stop in 0.5 s. Trivy 0.76.2: 0 CRITICAL, 47 HIGH (11 CVEs with no Debian fix, each with a dated exception in [security.md §6](docs/architecture/security.md#6-image-scan-results)) (2026-11-13) | Tested; HIGH findings accepted, not fixed |
 
-The guardrail tests are the spec the real Terraform must meet; they are not evidence about AWS. The Ansible results are from a local OrbStack machine, which is not an EC2 instance: sshd lockout safety, the security group, Let's Encrypt and Ansible over SSM can only be proven on AWS (Day 5). Nothing about the Dockerfile, deploy/rollback or AWS is proven yet; the rollback test script in [`infra/ansible/tests/`](infra/ansible/tests/) has nothing to run against until Day 3.
+The guardrail tests are the spec the real Terraform must meet; they are not evidence about AWS. The Ansible results are from a local OrbStack machine, which is not an EC2 instance: sshd lockout safety, the security group, Let's Encrypt and Ansible over SSM can only be proven on AWS (Day 5). The deploy script's AWS branches (ECR login, reading the secret from Parameter Store) have never run. Nothing about AWS is proven yet.
 
 ## Roadmap
 
@@ -99,7 +103,7 @@ The guardrail tests are the spec the real Terraform must meet; they are not evid
 |---|---|---|---|
 | 1 | Demo app + tests, architecture docs, ADRs 0001–0005, local test harness, `ci.yml` | Done (2026-11-13, [CI run](https://github.com/mohammed-shanid/aws-deploy-pipeline/actions/runs/43372145619)) | `ci.yml` passes on GitHub |
 | 2 | Ansible roles (base, ssh, firewall, docker, nginx with self-signed TLS) on a local OrbStack Ubuntu 24.04 machine | Done (2026-11-13, local) | `idempotence.sh --fresh` and each `--role` report `changed=0` on the second run |
-| 3 | Dockerfile, on-host deploy script (two slots, health gate, automatic rollback), watchdog, all local | Planned | `deploy_rollback.sh` passes; Trivy findings written up |
+| 3 | Dockerfile, on-host deploy script (two slots, health gate, automatic rollback), watchdog, all local | Done (2026-11-13, local) | `deploy_rollback.sh` passes; Trivy findings written up |
 | 4 | Terraform on AWS: bootstrap (state bucket, budget), then dev env (VPC, SG, EC2, IAM, ECR, OIDC) | Planned | `terraform test` and checkov pass on the real config, the `tags_all` check prints nothing, the instance shows Online in SSM |
 | 5 | Ansible on AWS with Let's Encrypt TLS, `deploy.yml` via OIDC → ECR → SSM | Planned | One green deploy, plus one deliberately broken deploy that rolls back automatically (run links saved) |
 | 6 | CloudWatch alarms → SNS email, 2 incident drills (hung app, 443 blocked), Makefile `up`/`destroy` | Planned | Alarm emails actually arrive; two write-ups in `docs/incidents/` |
@@ -164,7 +168,17 @@ Ansible roles against a local Ubuntu 24.04 machine (needs [OrbStack](https://orb
 .venv-infra/bin/ansible-lint                    # production profile
 infra/ansible/tests/idempotence.sh --fresh      # PASS: second run reported changed=0 for every role
 infra/ansible/tests/idempotence.sh --role nginx # one role on its own
+infra/ansible/tests/deploy_rollback.sh          # builds the image in the machine; ends with "PASS: good release kept serving through both broken deploys"
 ```
+
+The image on its own (needs Docker):
+
+```bash
+docker build -t adp-local:dev .                 # 234 MB
+docker run --rm -p 127.0.0.1:8000:8000 -e APP_ENV=dev -e GIT_SHA=local adp-local:dev
+```
+
+The Trivy command is in [security.md §6](docs/architecture/security.md#6-image-scan-results).
 
 Terraform guardrail mutation check (about 3 minutes; downloads the AWS provider on first run):
 

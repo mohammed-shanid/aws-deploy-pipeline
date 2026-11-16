@@ -76,7 +76,9 @@ Only list commands here after they have been run successfully in this repo.
 | Ansible lint | `.venv-infra/bin/ansible-lint` (repo root; config in `.ansible-lint`) |
 | Ansible idempotence, local OrbStack | `infra/ansible/tests/idempotence.sh --fresh` · `... --role <name>` (`--fresh` deletes and recreates the `adp-noble` machine) |
 | Ansible dry run, local | from `infra/ansible`: `ansible-playbook -i inventories/local/hosts.yml site.yml --check --diff` (only meaningful on an already-configured host) |
-| Image build / scan | FILL after Dockerfile exists |
+| Image build / scan | `docker build -t adp-local:dev .` · `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v adp-trivy-cache:/root/.cache aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image adp-local:dev` |
+| Deploy / rollback test, local OrbStack | `infra/ansible/tests/deploy_rollback.sh` (after `idempotence.sh`) |
+| Shell lint | `mise exec shellcheck@0.11.0 -- shellcheck <script>` |
 | Bring up / tear down | `make up` / `make destroy` (once Makefile exists) |
 
 ## Hard rules

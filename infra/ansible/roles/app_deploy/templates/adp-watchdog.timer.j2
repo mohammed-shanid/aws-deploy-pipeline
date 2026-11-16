@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Run the app watchdog every {{ app_deploy_watchdog_interval_seconds }} s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec={{ app_deploy_watchdog_interval_seconds }}
+AccuracySec=1
+
+[Install]
+WantedBy=timers.target

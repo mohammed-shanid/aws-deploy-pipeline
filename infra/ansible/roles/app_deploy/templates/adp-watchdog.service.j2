@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Restart the app container if it is unhealthy
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ app_deploy_root }}/bin/watchdog

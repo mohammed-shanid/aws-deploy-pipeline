@@ -1,0 +1,6 @@
+# Allowlist: the image needs only the app and its runtime requirements.
+*
+!app/
+!requirements.txt
+**/__pycache__/
+**/*.pyc
