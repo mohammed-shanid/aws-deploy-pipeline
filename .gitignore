@@ -24,3 +24,6 @@ __pycache__/
 
 # Ansible collections and ansible-lint cache
 .ansible/
+
+# Terraform backend settings (bucket name contains the account ID)
+backend.hcl
